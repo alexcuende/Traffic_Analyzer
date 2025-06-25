@@ -1,133 +1,218 @@
-from scapy.all import rdpcap, sniff, wrpcap, IP, TCP
-import matplotlib.pyplot as plt
-import geoip2.database
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+from scapy.all import sniff, wrpcap, rdpcap, IP, TCP
 from collections import Counter
-import json
 from datetime import datetime
-import pyfiglet
+import threading
 import requests
+import matplotlib.pyplot as plt
+import json
+import urllib3
 
-text = "Made by Alex Cuende"
-title = pyfiglet.figlet_format(text)
-print(title)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-GeoIP_DB_Path = 'GeoLite2-City.mmdb'
-hec_url = "https://127.0.0.1:8088/services/collector"
-hec_token = "your token"
+SPLUNK_HEC_URL = "https://127.0.0.1:8088/services/collector"
+SPLUNK_HEC_TOKEN = "b39a344e-3d3c-4554-830c-5976cb274400"
+ABUSEIPDB_API_KEY = '40f42d426a82712a17de5b93e6565a27098b81c18a9a0ed1ba59760dab3aaa420faa697d8dd2bed2'
 
-def capture_traffic(output_file='captured.pcap', count=1000):
-    print("Currently capturing live traffic")
-    packets = sniff(count=count)
-    wrpcap(output_file, packets)
-    print(f"Captured {count} packets to {output_file}")
+SUSPICIOUS_PORTS = [22, 23, 69, 135, 445, 3389]
 
-def get_geo_info(ip, db_path=GeoIP_DB_Path):
+IP_activity = Counter()
+analysis_log = []
+is_capturing = False
+
+def start_live_capture(): # Method to start thread while capturing data to allow the GUI be operative at the same time
+    global is_capturing
+    if is_capturing:
+        return
+    is_capturing = True
+    status_label.config(text="Capturing packets...", fg="orange")
+    threading.Thread(target=run_capture, daemon=True).start()
+
+def run_capture(): # Method to start the capture of data, change the count to make a bigger/smaller capture
     try:
-        with geoip2.database.Reader(db_path) as reader:
-            response = reader.city(ip)
-            return f"{response.city.name}, {response.country.name}"
-    except:
-        return "Not able to find location"
-    
-def plot_activity(IP_counts):
-    IPs = list(IP_counts.keys())
-    counts = list(IP_counts.values())
+        packets = sniff(count=1500)
+        filename = f"captured_{datetime.now().strftime('%H%M%S')}.pcap"
+        wrpcap(filename, packets)
+        status_label.config(text=f"Captured and saved to {filename}", fg="lightgreen")
+        analyze_pcap(filename)
+    except Exception as e:
+        messagebox.showerror("Error", f"Capture failed: {e}")
+    finally:
+        global is_capturing
+        is_capturing = False
 
-    plt.figure(figsize=(12,6))
-    plt.bar(IPs, counts, color='blue')
-    plt.xticks(rotation=45, ha='right')
-    plt.title("Suspicious activity IPs")
-    plt.xlabel("IPs")
-    plt.ylabel("Suspicious activities")
+def analyze_pcap(path): # Method to analyze the data
+    global IP_activity, analysis_log
+    IP_activity = Counter()
+    analysis_log = []
+
+    hosts_list.delete(0, tk.END)
+    try:
+        packets = rdpcap(path)
+    except Exception as e:
+        messagebox.showerror("Error", f"Could not read PCAP:\n{e}")
+        return
+
+    for pkt in packets:
+        if IP in pkt and TCP in pkt:
+            src = pkt[IP].src
+            dst = pkt[IP].dst
+            dport = pkt[TCP].dport
+            flags = pkt[TCP].flags
+
+            suspicious_ips = set()
+            reason = None
+
+           
+            if dport in SUSPICIOUS_PORTS:
+                reason = f"Suspicious Port: {dport}"
+                suspicious_ips.update([src, dst])
+            elif flags == 0x02:
+                reason = "SYN Packet"
+                suspicious_ips.update([src, dst])
+
+            if reason:
+                log_entry = f"[{datetime.now().strftime('%H:%M:%S')}] {src} → {dst}:{dport} | {reason}"
+                analysis_log.append(log_entry)
+                for ip in suspicious_ips:
+                    IP_activity[ip] += 1
+
+                send_event_to_splunk({
+                    "timestamp": datetime.now().isoformat(),
+                    "src_ip": src,
+                    "dst_ip": dst,
+                    "dest_port": dport,
+                    "reason": reason
+                })
+
+    if not analysis_log:
+        hosts_list.insert(tk.END, "No suspicious activity found.")
+        status_label.config(text="Analysis complete", fg="lightgreen")
+    else:
+        for entry in analysis_log:
+            hosts_list.insert(tk.END, entry)
+        status_label.config(text=f"Found {len(analysis_log)} suspicious entries", fg="orange")
+
+def browse_pcap(): # Method to look for .pcap files on your device
+    from tkinter import filedialog
+    file_path = filedialog.askopenfilename(filetypes=[("PCAP files", "*.pcap")])
+    if file_path:
+        analyze_pcap(file_path)
+
+def show_graph(): # Method to create the graph
+    if not IP_activity:
+        messagebox.showinfo("Graph", "No suspicious IPs to display.")
+        return
+
+    plt.figure(figsize=(12, 6))
+    plt.bar(IP_activity.keys(), IP_activity.values(), color='cyan')
+    plt.title("Suspicious Activity by IP")
+    plt.xlabel("IP Address")
+    plt.ylabel("Alerts")
+    plt.xticks(rotation=45)
     plt.tight_layout()
     plt.show()
 
-def analyze_pcap(file_path):
-    packets = rdpcap(file_path)
-    IP_activity = Counter()
-    port_activity = Counter()
-    SYN_activity = Counter()
-    geo_info = {}
-    suspicious_log = []
-
-    print(f"Analyzing {file_path} with {len(packets)} packets")
-
-    for packet in packets:
-        if IP in packet and TCP in packet:
-            source = packet[IP].src
-            dest = packet[IP].dst
-            destport = packet[TCP].dport
-            flags = packet[TCP].flags
-            # packet.show() if wanna see the contents of the packets
-
-            suspicious = False
-
-            if destport in [22, 23, 69, 135, 445, 3389]:
-                print(f"Suspicious port {destport} accessed by {source}")
-                port_activity[destport] += 1
-                suspicious = True
-            
-            if packet[TCP].flags == 0x02: #Scapy doesn't allow us to use S for SYN
-                print(f"SYN packet from {source} to {dest}:{destport}")
-                SYN_activity[source] += 1
-                suspicious = True
-            
-            if suspicious:
-                suspicious_log.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "source_IP": source,
-                    "destination_IP": dest,
-                    "destinantion_port": destport,
-                    "reason": f"{'SYN packet' if packet[TCP].flags == 0x02 else 'Suspicious port'}"
-                })
-                IP_activity[source] += 1
-                if source not in geo_info:
-                    geo_info[source] = get_geo_info(source)
-
-    send_to_splunk(suspicious_log, hec_url, hec_token)
-
-    log_filename = f"suspicious_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(log_filename, "w") as f:
-        json.dump(suspicious_log, f, indent=2)
-
-    print("Suspicious summary")
-    if not IP_activity:
-        print("No suspicious activity")
-    else:
-        for ip, count in IP_activity.items():
-            location = geo_info[ip]
-            print(f"{ip}({location}) with {count} alerts")
-
-        plot_activity(IP_activity)
-
-def send_to_splunk(suspicious_log, hec_url, hec_token):
+def send_event_to_splunk(event_message): # Method to send to splunk, Remember to activate HTTP.eventcollector
+    headers = {
+        'Authorization': f'Splunk {SPLUNK_HEC_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "event": event_message,
+        "sourcetype": "_json",
+        "source": "traffic_analyzer",
+        "host": "local_machine"
+    }
     try:
-        print("Sending to splunk")
-        payload = '\n'.join([json.dumps({"event": e, "sourcetype": "_json"}) for e in suspicious_log])
-        headers = {
-            'Authorization': f'Splunk {hec_token}',
-            'Content-Type': 'application/json'
-            }
-        response = requests.post(hec_url, headers=headers, data=payload, verify=False)
-        print(f"Splunk response: {response.status_code} - {response.text}")
-        response.raise_for_status()
+        response = requests.post(SPLUNK_HEC_URL, headers=headers, data=json.dumps(payload), verify=False)
+        if response.status_code != 200:
+            print(f"Splunk HEC error: {response.text}")
     except Exception as e:
-        print(f"Error sending data to Splunk: {e}")
+        print(f"Failed to send event to Splunk: {e}")
 
+def lookup_abuseipdb(ip): # Method to check in AbuseIPDB
+    if not ABUSEIPDB_API_KEY:
+        messagebox.showwarning("API Key Missing", "Please set your AbuseIPDB API key in the script.")
+        return
 
+    url = "https://api.abuseipdb.com/api/v2/check"
+    headers = {
+        'Accept': 'application/json',
+        'Key': ABUSEIPDB_API_KEY,
+    }
+    params = {
+        'ipAddress': ip,
+        'maxAgeInDays': 90
+    }
 
-if __name__ == "__main__":
-    import os
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        if 'data' in data:
+            abuse_data = data['data']
+            msg = (f"IP: {abuse_data['ipAddress']}\n"
+                   f"Abuse Confidence Score: {abuse_data['abuseConfidenceScore']}\n"
+                   f"Total Reports: {abuse_data['totalReports']}\n"
+                   f"Last Reported: {abuse_data.get('lastReportedAt', 'N/A')}\n"
+                   f"Country: {abuse_data.get('countryCode', 'N/A')}\n"
+                   f"Usage Type: {abuse_data.get('usageType', 'N/A')}\n"
+                   f"ISP: {abuse_data.get('isp', 'N/A')}\n"
+                   f"Domain: {abuse_data.get('domain', 'N/A')}")
+            messagebox.showinfo(f"AbuseIPDB Info for {ip}", msg)
+        else:
+            messagebox.showinfo("AbuseIPDB", f"No data found or incorrect format for IP {ip}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to get data from AbuseIPDB:\n{e}")
 
-    live = input("Enable live capture? (Y/N): ").lower() == 'y'
+def on_lookup_button(): # Method for getting the correct IP and send to AbuseIPDB
+    ip = ip_entry.get().strip()
+    if not ip:
+        selection = hosts_list.curselection()
+        if selection:
+            selected_text = hosts_list.get(selection[0])
+            parts = selected_text.split()
+            for part in parts:
+                if part.count('.') == 3:
+                    ip = part
+                    break
+    if not ip:
+        messagebox.showwarning("Input needed", "Please enter an IP or select an entry in the list.")
+        return
+    lookup_abuseipdb(ip)
 
-    if live:
-        capture_traffic()
-        pcap_file = 'captured.pcap'
-    else:
-        pcap_file = input("Enter path to .pcap file: ")
-        if not os.path.exists(pcap_file):
-            print("File not found")
-            exit()
-    
-    analyze_pcap(pcap_file)  
+#GUI
+window = tk.Tk()
+window.title("Traffic Analyzer")
+window.geometry("900x900")
+window.configure(bg="#000000")
+
+label_style = {"bg": "#000000", "fg": "lightgreen", "font": ("Consolas", 16)}
+btn_style = {"bg": "#333", "fg": "#fff", "activebackground": "#555", "font": ("Consolas", 14), "width": 18}
+
+tk.Label(window, text="Traffic Analyzer", font=("Consolas", 20), fg="#0dff00", bg="#000000").pack(pady=10)
+
+btn_frame = tk.Frame(window, bg="#000000")
+btn_frame.pack(pady=10)
+
+tk.Button(btn_frame, text="Start Live Capture", command=start_live_capture, **btn_style).grid(row=0, column=0, padx=6)
+tk.Button(btn_frame, text="Import .pcap File", command=browse_pcap, **btn_style).grid(row=0, column=1, padx=6)
+tk.Button(btn_frame, text="Get Graph", command=show_graph, **btn_style).grid(row=0, column=2, padx=6)
+
+lookup_frame = tk.Frame(window, bg="#000000")
+lookup_frame.pack(pady=10)
+
+tk.Label(lookup_frame, text="IP for AbuseIPDB lookup:", **label_style).grid(row=0, column=0, padx=5, sticky='e')
+ip_entry = tk.Entry(lookup_frame, width=30, bg="#2a2a2a", fg="#00ff88", insertbackground="#00ff88", font=("Consolas", 16))
+ip_entry.grid(row=0, column=1, padx=5)
+tk.Button(lookup_frame, text="Lookup AbuseIPDB", command=on_lookup_button, **btn_style).grid(row=0, column=2, padx=6)
+
+status_label = tk.Label(window, text="Waiting for input...", **label_style)
+status_label.pack(pady=10)
+
+tk.Label(window, text="Suspicious Traffic Log:", **label_style).pack()
+hosts_list = tk.Listbox(window, height=20, width=110, bg="#000000", fg="#00ff88", font=("Consolas", 10), bd=2)
+hosts_list.pack(pady=10)
+
+window.mainloop()
