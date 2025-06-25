@@ -12,8 +12,8 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 SPLUNK_HEC_URL = "https://127.0.0.1:8088/services/collector"
-SPLUNK_HEC_TOKEN = "b39a344e-3d3c-4554-830c-5976cb274400"
-ABUSEIPDB_API_KEY = '40f42d426a82712a17de5b93e6565a27098b81c18a9a0ed1ba59760dab3aaa420faa697d8dd2bed2'
+SPLUNK_HEC_TOKEN = "ENTER HEC_TOKEN"
+ABUSEIPDB_API_KEY = 'ENTER_APIKEY'
 
 SUSPICIOUS_PORTS = [22, 23, 69, 135, 445, 3389]
 
