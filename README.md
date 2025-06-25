@@ -11,14 +11,16 @@ pip install -r requirements.txt </pre>
 How to use:
 <pre>python traffic_analyzer.py</pre>
 
-when prompted, 
-<pre>Enable live capture? (Y/N): n
-Enter path to .pcap file: example.pcap
-</pre>
-(if want live traffic just say y instead of n)
+A GUI will appear enabling you to interact without the command prompt.
+
+![image](https://github.com/user-attachments/assets/4a6f993c-f094-4cf9-9e75-d7b9e7b6f3fc)
 
 MAKE SURE YOUR SPLUNK IS CORRECTLY INTEGRATED:
 
-<pre>hec_url = "https://127.0.0.1:8088/services/collector"
+<pre>SPLUNK_HEC_URL = "https://127.0.0.1:8088/services/collector"
 
-hec_token = "your-hec-token-here"</pre>
+SPLUNK_HEC_TOKEN = "your-hec-token-here"</pre>
+
+AND YOUR AbuseIDPB token:
+
+<pre>ABUSEIPDB_API_KEY = "your-APIKEY-here</pre>
